@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec bundle exec ruby -Ilib:test -e 'Dir["test/**/*_test.rb"].sort.each { |path| require "./#{path}" }'

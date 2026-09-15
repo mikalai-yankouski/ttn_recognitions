@@ -1,0 +1,33 @@
+name: ttn
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "0"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  ttn:
+    build: .
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      - "9292:9292"
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      PAPER_VISION_MODEL: ${PAPER_VISION_MODEL:-qwen2.5vl:7b}
+      TTN_HMAC_SECRET: ${TTN_HMAC_SECRET:?set TTN_HMAC_SECRET}
+      TTN_ALLOWED_SLUGS: ${TTN_ALLOWED_SLUGS:-*}
+      PORT: "9292"
+    restart: unless-stopped
+
+volumes:
+  ollama:
