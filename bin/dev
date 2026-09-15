@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# One-shot: Ollama + ttn on :3000 (cloudpub already maps this port).
+# Ctrl-C stops both. Tunnel stays in the other tab: `clo run`.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [ -s "${HOME}/.rvm/scripts/rvm" ]; then
+  # shellcheck disable=SC1091
+  source "${HOME}/.rvm/scripts/rvm"
+  rvm use 3.2.2 >/dev/null
+fi
+
+set -a
+# shellcheck disable=SC1091
+[ -f .env ] && . ./.env
+set +a
+
+export PORT="${PORT:-3000}"
+export RAILS_MAX_THREADS="${RAILS_MAX_THREADS:-2}"
+export OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+
+ollama_pid=""
+started_ollama=0
+
+cleanup() {
+  if [ "$started_ollama" = 1 ] && [ -n "$ollama_pid" ]; then
+    kill "$ollama_pid" 2>/dev/null || true
+    wait "$ollama_pid" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
+
+ollama_up() {
+  curl -sf --max-time 1 "${OLLAMA_URL}/api/tags" >/dev/null 2>&1
+}
+
+if ollama_up; then
+  echo "[dev] ollama already running at ${OLLAMA_URL}"
+else
+  echo "[dev] starting ollama serve"
+  ollama serve &
+  ollama_pid=$!
+  started_ollama=1
+  for _ in $(seq 1 40); do
+    if ollama_up; then
+      break
+    fi
+    sleep 0.25
+  done
+  if ! ollama_up; then
+    echo "[dev] ollama did not start on ${OLLAMA_URL}" >&2
+    exit 1
+  fi
+fi
+
+echo "[dev] ttn http://127.0.0.1:${PORT}  (tunnel: https://maladroitly-social-worm.cloudpub.ru)"
+exec bundle exec puma -C config/puma.rb -b "tcp://127.0.0.1:${PORT}"

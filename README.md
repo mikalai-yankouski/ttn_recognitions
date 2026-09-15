@@ -32,8 +32,10 @@
 bundle install
 cp .env.example .env
 ollama pull qwen2.5vl:7b
-bundle exec puma -C config/puma.rb
+bin/dev
 ```
+
+`bin/dev` поднимает Ollama (если ещё не запущена) и ttn на `localhost:3000` — в этот порт смотрит cloudpub. Туннель отдельно: `clo run`. Ctrl-C гасит ttn и ту Ollama, которую скрипт сам запустил.
 
 Или `docker compose up --build`. После первого старта: `docker compose exec ollama ollama pull qwen2.5vl:7b`.
 
