@@ -31,6 +31,7 @@ end
 
 paper_dir = File.expand_path("../paper", __dir__)
 %w[
+  utf8
   vat_rate
   invoice_totals
   invoice_schema

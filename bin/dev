@@ -4,10 +4,30 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if [ -s "${HOME}/.rvm/scripts/rvm" ]; then
-  # shellcheck disable=SC1091
-  source "${HOME}/.rvm/scripts/rvm"
-  rvm use 3.2.2 >/dev/null
+# Same env as proxy_on() in ~/.zshrc (no credential echo). Gemini needs it from BY.
+if [ -z "${HTTPS_PROXY:-}" ] && [ -z "${HTTP_PROXY:-}" ] && [ -f "$HOME/.zshrc" ]; then
+  eval "$(python3 - <<'PY'
+from pathlib import Path
+import re, shlex
+text = Path.home().joinpath(".zshrc").read_text()
+url_m = re.search(r'^_PROXY_URL="([^"]+)"', text, re.M)
+no_m = re.search(r'^_PROXY_NO="([^"]+)"', text, re.M)
+if not url_m:
+    raise SystemExit(0)
+url = url_m.group(1)
+no = no_m.group(1) if no_m else "localhost,127.0.0.1,::1"
+for key, value in {
+    "HTTP_PROXY": url,
+    "HTTPS_PROXY": url,
+    "http_proxy": url,
+    "https_proxy": url,
+    "NO_PROXY": no,
+    "no_proxy": no,
+    "NODE_USE_ENV_PROXY": "1",
+}.items():
+    print(f"export {key}={shlex.quote(value)}")
+PY
+)"
 fi
 
 set -a
@@ -15,9 +35,20 @@ set -a
 [ -f .env ] && . ./.env
 set +a
 
+if [ -n "${HTTPS_PROXY:-}${HTTP_PROXY:-}" ]; then
+  echo "[dev] proxy on (Gemini via corporate proxy; Ollama stays local)"
+else
+  echo "[dev] proxy off — Gemini from this network may fail, Ollama fallback stays"
+fi
+
 export PORT="${PORT:-3000}"
 export RAILS_MAX_THREADS="${RAILS_MAX_THREADS:-2}"
 export OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+
+if ! command -v bundle >/dev/null; then
+  echo "[dev] bundle not in PATH. Open a new shell in this directory (rvm picks 3.2.2) and retry." >&2
+  exit 1
+fi
 
 ollama_pid=""
 started_ollama=0

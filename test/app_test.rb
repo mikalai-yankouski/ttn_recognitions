@@ -64,6 +64,37 @@ class AppTest < Minitest::Test
     end
   end
 
+  def test_recognize_accepts_ascii_8bit_cyrillic_json
+    recognizer = Object.new
+    recognizer.define_singleton_method(:call) do |_upload|
+      {
+        "document_number" => "0939716",
+        "supplier_name" => "ООО Тест",
+        "items" => [ { "name" => "Сэндвич", "quantity" => 1, "price" => 8 } ]
+      }.to_json.force_encoding(Encoding::ASCII_8BIT)
+    end
+    @app = Ttn::App.new(
+      recognizer:,
+      auth: Ttn::Auth.new(secret: "test-secret", allowlist: "varka")
+    )
+
+    with_jpeg("\xFF\xD8fakejpeg".b) do |path, jpeg|
+      issued = Time.now.to_i.to_s
+      digest = Ttn::Auth.digest(jpeg)
+      signature = Ttn::Auth.sign(secret: "test-secret", slug: "varka", issued_at: issued, body_digest: digest)
+
+      header "X-Ttn-Tenant", "varka"
+      header "X-Ttn-Issued-At", issued
+      header "X-Ttn-Signature", signature
+      post "/v1/recognize", { "image" => Rack::Test::UploadedFile.new(path, "image/jpeg") }
+
+      assert_equal 200, last_response.status, last_response.body
+      body = JSON.parse(last_response.body)
+      assert_equal "ООО Тест", body["supplier_name"]
+      assert_equal "Сэндвич", body.dig("items", 0, "name")
+    end
+  end
+
   private
 
   def with_jpeg(bytes)

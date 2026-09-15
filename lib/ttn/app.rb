@@ -2,6 +2,7 @@
 
 require "tempfile"
 require "tmpdir"
+require_relative "../paper/utf8"
 
 module Ttn
   class App
@@ -35,20 +36,27 @@ module Ttn
       auth = @auth.call(env, body_digest: digest)
       return json(auth.status, { error: auth.error }) unless auth.ok
 
-      json_text = with_tempfile(bytes, filename) do |path|
-        upload = Upload.new(
-          path: path,
-          original_filename: filename,
-          content_type: content_type,
-          size: bytes.bytesize
-        )
-        recognizer.call(upload)
-      end
+      json_text = Paper::Utf8.string(
+        with_tempfile(bytes, filename) do |path|
+          upload = Upload.new(
+            path: path,
+            original_filename: filename,
+            content_type: content_type,
+            size: bytes.bytesize
+          )
+          recognizer.call(upload)
+        end
+      )
 
       payload = JSON.parse(json_text)
       json(200, payload.merge("tenant_slug" => auth.slug))
     rescue JSON::ParserError
       json(502, { error: "Модель вернула не JSON" })
+    rescue Encoding::CompatibilityError => error
+      if defined?(Rails) && Rails.respond_to?(:logger)
+        Rails.logger.warn("[ttn] encoding: #{error.message}")
+      end
+      json(500, { error: "Не удалось обработать ответ распознавания" })
     rescue Paper::Recognize::Error => error
       status = error.is_a?(Paper::Recognize::Unavailable) ? 503 : 422
       json(status, { error: error.message })
@@ -58,21 +66,21 @@ module Ttn
       if image.is_a?(Hash)
         file = image[:tempfile] || image["tempfile"]
         bytes = File.binread(file.path)
-        name = (image[:filename] || image["filename"]).to_s
+        name = Paper::Utf8.string((image[:filename] || image["filename"]).to_s)
         type = (image[:type] || image["type"]).to_s
         return [bytes, name.presence || "scan.jpg", type.presence || "image/jpeg"]
       end
 
       if image.respond_to?(:tempfile)
         bytes = File.binread(image.tempfile.path)
-        name = image.original_filename.to_s if image.respond_to?(:original_filename)
+        name = Paper::Utf8.string(image.original_filename) if image.respond_to?(:original_filename)
         type = image.content_type.to_s if image.respond_to?(:content_type)
         return [bytes, name.presence || "scan.jpg", type.presence || "image/jpeg"]
       end
 
       if image.respond_to?(:path)
         bytes = File.binread(image.path)
-        name = image.original_filename.to_s if image.respond_to?(:original_filename)
+        name = Paper::Utf8.string(image.original_filename) if image.respond_to?(:original_filename)
         type = image.content_type.to_s if image.respond_to?(:content_type)
         return [bytes, name.presence || File.basename(image.path), type.presence || "image/jpeg"]
       end
@@ -96,7 +104,7 @@ module Ttn
     end
 
     def json(status, body)
-      payload = JSON.generate(body)
+      payload = JSON.generate(Paper::Utf8.deep(body))
       [status, { "content-type" => "application/json; charset=utf-8" }, [payload]]
     end
   end

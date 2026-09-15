@@ -1,6 +1,9 @@
 # frozen_string_literal: true
 
 require "base64"
+require "json"
+require "uri"
+require_relative "utf8"
 
 module Paper
   class Vision
@@ -10,8 +13,9 @@ module Paper
     DEFAULT_OPENAI_MODEL = "gpt-4o"
     DEFAULT_XAI_URL = "https://api.x.ai/v1"
     DEFAULT_XAI_MODEL = "grok-2-vision-1212"
-    DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
-    DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+    DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/"
+    DEFAULT_GEMINI_MODEL = "gemini-flash-lite-latest"
+    DEFAULT_GEMINI_FALLBACKS = "gemini-3.1-flash-lite,gemini-3-flash-preview"
     MAX_EDGE = 3072
     PROMPT = <<~TEXT.freeze
       Извлеки данные с фото белорусской товарной накладной (ТН/ТТН) или счёта на оплату.
@@ -126,8 +130,8 @@ module Paper
     /ix
 
     def self.default_provider
-      return :openai if openai_key.present?
       return :gemini if gemini_key.present?
+      return :openai if openai_key.present?
 
       :ollama
     end
@@ -141,32 +145,42 @@ module Paper
     end
 
     def self.payment_scan?(filename)
-      File.basename(filename.to_s).match?(PAYMENT_FILENAME)
+      File.basename(Utf8.string(filename)).match?(PAYMENT_FILENAME)
     end
 
     def self.request_timeout(provider = default_provider)
       explicit = ENV["PAPER_VISION_TIMEOUT"].to_i
       return explicit if explicit.positive?
 
-      provider.to_sym == :ollama ? 2100 : 400
+      case provider.to_sym
+      when :ollama then 2100
+      when :gemini then ENV.fetch("PAPER_VISION_GEMINI_TIMEOUT", "8").to_i
+      else 400
+      end
     end
 
-    def initialize(url: nil, model: nil, connection: nil, api_key: nil, provider: nil, profile: nil)
+    def initialize(url: nil, model: nil, connection: nil, api_key: nil, provider: nil, profile: nil, ollama_connection: nil)
       @provider = (provider || self.class.default_provider).to_sym
       @profile = Integer(profile, exception: false)
       @api_key = api_key.presence || key_for_provider
       @url = url.presence || url_for_provider
+      @explicit_model = model.present?
       @model = model.presence || model_for_provider
+      @ollama_connection = ollama_connection
       @connection = connection || default_connection
     end
 
     def call(image_path, filename: nil)
       @source_name = filename.presence || File.basename(image_path.to_s)
-      case @provider
-      when :openai then call_openai(image_path)
-      when :gemini then call_gemini(image_path)
-      else call_ollama(image_path)
+      return call_openai(image_path) if @provider == :openai
+
+      if gemini_first?
+        json = try_gemini(image_path)
+        return json if json.present?
       end
+
+      ensure_ollama_client!
+      call_ollama(image_path)
     ensure
       @source_name = nil
     end
@@ -323,9 +337,104 @@ module Paper
       raise Recognize::Unavailable, "Не удалось обратиться к vision API: #{error.message}"
     end
 
-    def call_gemini(image_path)
-      response = @connection.post("/models/#{@model}:generateContent") do |request|
-        request.params["key"] = @api_key if @api_key.present?
+    def gemini_first?
+      @provider != :ollama && self.class.gemini_key.present?
+    end
+
+    def try_gemini(image_path)
+      skip = {}
+      started = monotonic_now
+      deadline = started + gemini_budget
+      round = 0
+
+      loop do
+        round += 1
+        remaining = deadline - monotonic_now
+        break if remaining <= 0 && round > 1
+
+        gemini_models.each do |model|
+          next if skip[model]
+
+          remaining = deadline - monotonic_now
+          break if remaining <= 0 && round > 1
+
+          @model = model
+          json = call_gemini(image_path, timeout: gemini_call_timeout(remaining))
+          elapsed = (monotonic_now - started).round(1)
+          Rails.logger.info("[paper] gemini recognized via #{@model} round=#{round} after=#{elapsed}s")
+          return json
+        rescue Recognize::Unavailable => error
+          remaining = [ deadline - monotonic_now, 0 ].max.round(1)
+          Rails.logger.warn("[paper] gemini #{@model} round=#{round} left=#{remaining}s failed: #{error.message}")
+          skip[model] = true unless retryable_gemini?(error)
+        end
+
+        break if gemini_models.all? { |model| skip[model] }
+
+        remaining = deadline - monotonic_now
+        break if remaining <= 0
+
+        delay = [ gemini_retry_sleep, remaining ].min
+        sleep(delay) if delay.positive?
+      end
+
+      elapsed = (monotonic_now - started).round(1)
+      Rails.logger.warn("[paper] gemini unavailable after #{elapsed}s, falling back to ollama")
+      nil
+    end
+
+    def gemini_models
+      return [ @model ] if @explicit_model
+
+      primary = ENV["PAPER_VISION_CLOUD_MODEL"].presence || DEFAULT_GEMINI_MODEL
+      extras = ENV.fetch("PAPER_VISION_GEMINI_FALLBACKS", DEFAULT_GEMINI_FALLBACKS)
+                  .split(",")
+                  .map(&:strip)
+                  .reject(&:blank?)
+      [ primary, *extras ].uniq
+    end
+
+    def gemini_budget
+      ENV.fetch("PAPER_VISION_GEMINI_BUDGET", "60").to_f
+    end
+
+    def gemini_call_timeout(remaining)
+      cap = self.class.request_timeout(:gemini).to_f
+      cap = 8 if cap <= 0
+      timeout = remaining.positive? ? [ cap, remaining ].min : cap
+      timeout.clamp(1, cap)
+    end
+
+    def monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def gemini_retry_sleep
+      ENV.fetch("PAPER_VISION_GEMINI_RETRY_SLEEP", "1.5").to_f
+    end
+
+    def gemini_generate_path
+      "models/#{@model}:generateContent"
+    end
+
+    def retryable_gemini?(error)
+      return false if error.message.match?(/ключ vision API отклонён|USER_LOCATION|location is not supported/i)
+      return false if error.message.match?(/\b404\b|NOT_FOUND/i)
+
+      true
+    end
+
+    def ensure_ollama_client!
+      @provider = :ollama
+      @model = ENV["PAPER_VISION_OLLAMA_MODEL"].presence || ENV.fetch("PAPER_VISION_MODEL", DEFAULT_OLLAMA_MODEL)
+      @url = ENV.fetch("OLLAMA_URL", DEFAULT_OLLAMA_URL)
+      @connection = @ollama_connection || default_connection
+    end
+
+    def call_gemini(image_path, timeout: nil)
+      response = @connection.post(gemini_generate_path) do |request|
+        request.headers["X-goog-api-key"] = @api_key if @api_key.present?
+        request.options.timeout = timeout if timeout
         request.body = {
           contents: [
             {
@@ -408,7 +517,8 @@ module Paper
       when :openai
         configured || (xai_only? ? DEFAULT_XAI_URL : DEFAULT_OPENAI_URL)
       when :gemini
-        configured || DEFAULT_GEMINI_URL
+        url = configured || DEFAULT_GEMINI_URL
+        url.end_with?("/") ? url : "#{url}/"
       else
         configured || ENV.fetch("OLLAMA_URL", DEFAULT_OLLAMA_URL)
       end
@@ -418,11 +528,11 @@ module Paper
       cloud = ENV["PAPER_VISION_CLOUD_MODEL"].presence
       case @provider
       when :openai
-        cloud || ENV["PAPER_VISION_MODEL"].presence || (xai_only? ? DEFAULT_XAI_MODEL : DEFAULT_OPENAI_MODEL)
+        cloud || (xai_only? ? DEFAULT_XAI_MODEL : DEFAULT_OPENAI_MODEL)
       when :gemini
-        cloud || ENV["PAPER_VISION_MODEL"].presence || DEFAULT_GEMINI_MODEL
+        cloud || DEFAULT_GEMINI_MODEL
       else
-        ENV.fetch("PAPER_VISION_MODEL", DEFAULT_OLLAMA_MODEL)
+        ENV["PAPER_VISION_OLLAMA_MODEL"].presence || ENV.fetch("PAPER_VISION_MODEL", DEFAULT_OLLAMA_MODEL)
       end
     end
 
@@ -501,21 +611,67 @@ module Paper
     end
 
     def cloud_error_message(response)
+      detail = google_error_detail(response)
       if response.status == 401 || response.status == 403
         return "Ключ vision API отклонён. Проверьте PAPER_VISION_API_KEY или GEMINI_API_KEY."
       end
+      if response.status == 503
+        return "Gemini 503 очередь #{@model}. #{detail}".squish.truncate(200)
+      end
 
-      "Vision API ответил #{response.status}."
+      suffix = detail.present? ? ": #{detail}" : "."
+      "Vision API ответил #{response.status}#{suffix}".truncate(200)
+    end
+
+    def google_error_detail(response)
+      body = response.body
+      body = JSON.parse(body) if body.is_a?(String)
+      return "" unless body.is_a?(Hash)
+
+      err = body["error"] || body[:error]
+      return err.to_s if err.is_a?(String)
+      return err["message"].to_s if err.is_a?(Hash) && err["message"]
+      return err[:message].to_s if err.is_a?(Hash) && err[:message]
+
+      ""
+    rescue JSON::ParserError
+      ""
     end
 
     def default_connection
-      Faraday.new(url: @url) do |faraday|
+      options = { url: @url }
+      if local_url?(@url)
+        options[:proxy] = nil
+      elsif (proxy = proxy_url).present?
+        options[:proxy] = proxy
+      end
+
+      Faraday.new(**options) do |faraday|
         faraday.request :json
-        faraday.response :json, content_type: /\bjson/
+        faraday.response :json, content_type: /\bjson/, parser_options: { decoder: [ JsonBody, :parse ] }
         faraday.adapter Faraday.default_adapter
         faraday.options.timeout = self.class.request_timeout(@provider)
         faraday.options.open_timeout = 8
       end
+    end
+
+    # json 3 only takes keyword options; Faraday still calls JSON.parse(body, {}).
+    module JsonBody
+      def self.parse(body, _options = nil)
+        JSON.parse(body)
+      end
+    end
+    private_constant :JsonBody
+
+    def proxy_url
+      ENV["HTTPS_PROXY"].presence || ENV["https_proxy"].presence || ENV["HTTP_PROXY"].presence || ENV["http_proxy"].presence
+    end
+
+    def local_url?(url)
+      host = URI.parse(url.to_s).host.to_s
+      host.empty? || host == "localhost" || host == "127.0.0.1" || host == "::1"
+    rescue URI::InvalidURIError
+      false
     end
   end
 end

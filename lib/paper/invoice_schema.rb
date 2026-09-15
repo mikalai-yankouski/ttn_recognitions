@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "utf8"
+
 module Paper
   module InvoiceSchema
     module_function
@@ -102,7 +104,7 @@ module Paper
     end
 
     def parse(content)
-      stripped = content.to_s.strip
+      stripped = Utf8.string(content).strip
       stripped = stripped.sub(/\A```(?:json)?/i, "").sub(/```\z/, "").strip
       JSON.parse(stripped)
     rescue JSON::ParserError
@@ -113,7 +115,7 @@ module Paper
       return unless row.is_a?(Hash)
 
       item = row.stringify_keys
-      name = item["name"].to_s.strip
+      name = Utf8.string(item["name"]).strip
       return if name.blank? || price_only_name?(name) || garbage_item_name?(name)
 
       item["name"] = normalize_item_name(name)

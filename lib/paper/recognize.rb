@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative "utf8"
+
 module Paper
   class Recognize
     class Error < StandardError; end
@@ -51,7 +53,7 @@ module Paper
 
     def source_filename
       if @upload.respond_to?(:original_filename) && @upload.original_filename.present?
-        return @upload.original_filename.to_s
+        return Utf8.string(@upload.original_filename)
       end
 
       File.basename(source_path(@upload).to_s)
