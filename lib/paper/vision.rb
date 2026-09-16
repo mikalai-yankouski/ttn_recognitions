@@ -14,8 +14,9 @@ module Paper
     DEFAULT_XAI_URL = "https://api.x.ai/v1"
     DEFAULT_XAI_MODEL = "grok-2-vision-1212"
     DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/"
-    DEFAULT_GEMINI_MODEL = "gemini-flash-lite-latest"
+    DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
     DEFAULT_GEMINI_FALLBACKS = "gemini-3.1-flash-lite,gemini-3-flash-preview"
+    DEFAULT_GEMINI_BUDGET = "180"
     MAX_EDGE = 3072
     PROMPT = <<~TEXT.freeze
       Извлеки данные с фото белорусской товарной накладной (ТН/ТТН) или счёта на оплату.
@@ -35,7 +36,7 @@ module Paper
       }
       Правила:
       - Бери значения только с фото, не копируй примеры схемы.
-      - Если это «Удостоверение качества», а не товарная накладная — сразу верни items: [] и recognition_warnings: ["Это удостоверение качества, а не товарная накладная."]. Не перечисляй изделия.
+      - Если это «Удостоверение качества», письмо, печать МЧС или любой кадр без товарной таблицы — сразу верни items: [] и recognition_warnings: ["Это не товарная накладная."]. Не выдумывай строки.
       - Если это «Счёт на оплату» / «Счет на оплату» — всё равно заполни items из таблицы. document_number — номер счёта. price — колонка «Цена» без НДС. Не оставляй items пустым.
       - name — текст из колонки «Наименование», никогда не голая цена вроде 4.63.
       - Не ставь в name сумму прописью («Сорок четыре рубля»), «Итого», «покупка», «Товарный раздел» или сертификат.
@@ -52,6 +53,15 @@ module Paper
       - document_number — номер товарной накладной у серии (ЯЛ/ЯР/ЯМ) или штрихкода, 6–8 цифр. Не УНП и не УПН (9 цифр у грузоотправителя/получателя).
       - supplier_name — поле «Грузоотправитель» (левая колонка), не грузополучатель, не страна, не типография.
       - Пекарня «Честный хлеб», не «Частный хлеб».
+      Контекст бланка ТН РБ:
+      - Серия (ЯЛ/ЯР/ЯМ/ЯН) и номер 6–8 цифр у штрихкода «ТОВАРНАЯ НАКЛАДНАЯ». Не УНП/УПН (9 цифр сверху) и не год формы 2016 («постановление 30.06.2016»).
+      - Дата — «16 сентября 2026 г.» рядом с номером, не 2016.
+      - Грузоотправитель — ЛЕВАЯ колонка шапки, полное ООО «Название». Справа грузополучатель — не supplier_name. Не оставляй supplier_name как голое «ООО».
+      - Колонки: 3 количество, 4 цена без НДС, 5 стоимость, 6 ставка НДС, 7 сумма НДС, 8 стоимость с НДС.
+      - amount_with_vat бери только из колонки 8. Если колонка 8 равна колонке 5 — vat_rate для импорта 0, даже если в колонке 6 10/13/20. vat_amount всё равно из колонки 7.
+      - document_total — цифры «Всего стоимость с НДС» в подвале, не сумма НДС.
+      - Единица может быть «Пор.», «шт», «кг». Прочитай ВСЕ строки до ИТОГО.
+      Пример: Круассан Классический, Пор., 2 × 3.70, стоимость 7.40, ставка 13.0951, НДС 0.97, стоимость с НДС 7.40 → vat_rate 0, amount_with_vat 7.40.
       Если поля нет — null. Если строк нет — пустой массив items.
     TEXT
     TABLE_PROMPT = <<~TEXT.freeze
@@ -61,11 +71,11 @@ module Paper
       declared_line_count — число товарных строк до ИТОГО. document_total — итог стоимости с НДС цифрами.
       name — полное наименование с кавычками и граммами как в бланке, не число из колонки «Цена».
       Не включай ИТОГО, сумму прописью, «Товарный раздел» и сертификаты.
-      Если это удостоверение качества без цен — верни {"items":[],"total_vat_text":null}.
+      Если это удостоверение качества без цен — верни {"items":[],"total_vat_text":null,"recognition_warnings":["Это удостоверение качества, а не товарная накладная."]}.
       price — колонка Цена за единицу БЕЗ НДС, не стоимость строки и не сумма с НДС.
       vat_rate — текст ячейки «Ставка НДС %»: «Без НДС», «0», «10», «13», «20» или «25». Не подставляй 20 вместо «Без НДС».
       0 если в ячейке «Без НДС» / 0% или в ИТОГО написано «без НДС» / «Ноль руб.» — тогда 0 у всех строк, не 20.
-      Если «Стоимость с НДС» равна стоимости без НДС, vat_rate 0 и vat_amount 0.
+      Если колонка «Стоимость с НДС» равна «Стоимость» без НДС — vat_rate 0, даже при 10/13/20 в ставке. Всё равно заполни amount_with_vat из колонки 8.
       vat_amount — колонка «Сумма НДС». amount_with_vat — «Стоимость с НДС».
       total_vat_text — «Всего сумма НДС» или ИТОГО сумма НДС как на бланке, дословно.
       Не извлекайте грузоотправителя из товарного раздела.
@@ -79,7 +89,8 @@ module Paper
       Не бери «Грузополучателя» (правая колонка), не страну, не УНП, не адрес, не типографию, не «экз. грузоотправителю».
       Если написано «Общество с ограниченной ответственностью», сократи до ООО.
       Пекарня называется «Честный хлеб», не «Частный хлеб».
-      Дата накладной — строка вида «20 августа 2026 г.», не постановление 2016 года.
+      Дата накладной — строка вида «16 сентября 2026 г.» у номера ТН, не постановление 2016 года и не УНП.
+      supplier_name — полное имя в кавычках, не голое «ООО».
       Бери значения только с фото.
     TEXT
     COMPOSITE_PROMPT = <<~TEXT.freeze
@@ -154,7 +165,7 @@ module Paper
 
       case provider.to_sym
       when :ollama then 2100
-      when :gemini then ENV.fetch("PAPER_VISION_GEMINI_TIMEOUT", "8").to_i
+      when :gemini then ENV.fetch("PAPER_VISION_GEMINI_TIMEOUT", "45").to_i
       else 400
       end
     end
@@ -359,13 +370,14 @@ module Paper
           break if remaining <= 0 && round > 1
 
           @model = model
-          json = call_gemini(image_path, timeout: gemini_call_timeout(remaining))
+          mode = round > 1 ? :crops : :full
+          json = call_gemini(image_path, timeout: gemini_call_timeout(remaining), mode: mode)
           elapsed = (monotonic_now - started).round(1)
-          Rails.logger.info("[paper] gemini recognized via #{@model} round=#{round} after=#{elapsed}s")
+          Rails.logger.info("[paper] gemini recognized via #{@model} mode=#{mode} round=#{round} after=#{elapsed}s")
           return json
         rescue Recognize::Unavailable => error
           remaining = [ deadline - monotonic_now, 0 ].max.round(1)
-          Rails.logger.warn("[paper] gemini #{@model} round=#{round} left=#{remaining}s failed: #{error.message}")
+          Rails.logger.warn("[paper] gemini #{@model} mode=#{mode} round=#{round} left=#{remaining}s failed: #{error.message}")
           skip[model] = true unless retryable_gemini?(error)
         end
 
@@ -395,12 +407,12 @@ module Paper
     end
 
     def gemini_budget
-      ENV.fetch("PAPER_VISION_GEMINI_BUDGET", "60").to_f
+      ENV.fetch("PAPER_VISION_GEMINI_BUDGET", DEFAULT_GEMINI_BUDGET).to_f
     end
 
     def gemini_call_timeout(remaining)
       cap = self.class.request_timeout(:gemini).to_f
-      cap = 8 if cap <= 0
+      cap = 45 if cap <= 0
       timeout = remaining.positive? ? [ cap, remaining ].min : cap
       timeout.clamp(1, cap)
     end
@@ -417,6 +429,14 @@ module Paper
       "models/#{@model}:generateContent"
     end
 
+    def gemini_thinking_config
+      if @model.to_s.match?(/gemini-3/i)
+        { thinkingLevel: "minimal" }
+      else
+        { thinkingBudget: 0 }
+      end
+    end
+
     def retryable_gemini?(error)
       return false if error.message.match?(/ключ vision API отклонён|USER_LOCATION|location is not supported/i)
       return false if error.message.match?(/\b404\b|NOT_FOUND/i)
@@ -431,8 +451,51 @@ module Paper
       @connection = @ollama_connection || default_connection
     end
 
-    def call_gemini(image_path, timeout: nil)
-      response = @connection.post(gemini_generate_path) do |request|
+    def call_gemini(image_path, timeout: nil, mode: :full)
+      if mode == :crops
+        json = recognize_gemini_crops(image_path, timeout:)
+        return json if json.present?
+      end
+
+      parse_success!(
+        post_gemini(document_prompt, image_path, timeout:, schema: InvoiceSchema.gemini_json_schema),
+        quality: true
+      )
+    rescue Faraday::ConnectionFailed, Faraday::TimeoutError, Faraday::SSLError => error
+      raise Recognize::Unavailable, "Gemini недоступен (#{error.class.name.demodulize}). Проверьте GEMINI_API_KEY."
+    rescue Faraday::Error => error
+      raise Recognize::Unavailable, "Не удалось обратиться к Gemini: #{error.message}"
+    end
+
+    def recognize_gemini_crops(image_path, timeout: nil)
+      crops = Crops.new(composite: false).call(image_path)
+      return unless crops.usable?
+
+      items_json = parse_success!(
+        post_gemini(TABLE_PROMPT, crops.table, timeout:, schema: InvoiceSchema.gemini_items_json_schema)
+      )
+      header = {}
+      if crops.header.present?
+        begin
+          header = parse_object(
+            post_gemini(HEADER_PROMPT, crops.header, timeout:, schema: InvoiceSchema.gemini_header_json_schema)
+          )
+        rescue Recognize::Unavailable
+          header = {}
+        end
+      end
+      json = merge_vision(header, items_json)
+      unless gemini_acceptable?(json)
+        raise Recognize::Unavailable, "Gemini вернул несогласованную накладную, повторяю"
+      end
+
+      json
+    ensure
+      crops&.cleanup
+    end
+
+    def post_gemini(prompt, image_path, timeout: nil, schema: InvoiceSchema.gemini_json_schema)
+      @connection.post(gemini_generate_path) do |request|
         request.headers["X-goog-api-key"] = @api_key if @api_key.present?
         request.options.timeout = timeout if timeout
         request.body = {
@@ -440,30 +503,63 @@ module Paper
             {
               role: "user",
               parts: [
-                { text: document_prompt },
+                { text: prompt },
                 { inline_data: { mime_type: "image/jpeg", data: encoded_image(image_path) } }
               ]
             }
           ],
-          generationConfig: { temperature: 0, responseMimeType: "application/json" }
+          generationConfig: {
+            temperature: 0,
+            maxOutputTokens: 8192,
+            responseMimeType: "application/json",
+            responseSchema: schema,
+            thinkingConfig: gemini_thinking_config
+          }
         }
       end
-      parse_success!(response)
-    rescue Faraday::ConnectionFailed, Faraday::TimeoutError, Faraday::SSLError => error
-      raise Recognize::Unavailable, "Gemini недоступен (#{error.class.name.demodulize}). Проверьте GEMINI_API_KEY."
-    rescue Faraday::Error => error
-      raise Recognize::Unavailable, "Не удалось обратиться к Gemini: #{error.message}"
     end
 
-    def parse_success!(response, ollama: false)
+    def parse_success!(response, ollama: false, quality: false)
       unless response.success?
         raise Recognize::Unavailable, ollama ? model_missing_message(response) : cloud_error_message(response)
       end
 
-      json = extract_json(extract_content(response.body))
-      raise Recognize::Unavailable, "Модель не вернула JSON накладной" if json.blank?
+      raw = extract_content(response.body)
+      json = extract_json(raw)
+      if json.blank?
+        parsed = InvoiceSchema.parse(raw)
+        names = Array(parsed.is_a?(Hash) ? parsed["items"] || parsed[:items] : []).first(8)
+        names = names.map { |row| row.is_a?(Hash) ? row.stringify_keys["name"] : row.to_s.truncate(40) }
+        snippet = Utf8.string(raw).gsub(/\s+/, " ").truncate(180)
+        Rails.logger.warn("[paper] empty invoice json finish=#{gemini_finish_reason(response.body)} names=#{names.inspect} snippet=#{snippet.inspect}")
+        raise Recognize::Unavailable, parsed.is_a?(Hash) ? "Gemini вернул несогласованную накладную, повторяю" : "Модель не вернула JSON накладной"
+      end
+      if quality && !gemini_acceptable?(json)
+        raise Recognize::Unavailable, "Gemini вернул несогласованную накладную, повторяю"
+      end
 
       json
+    end
+
+    def gemini_acceptable?(json)
+      parsed = InvoiceSchema.parse(json)
+      return false unless parsed.is_a?(Hash)
+
+      parsed = parsed.stringify_keys
+      warnings = Array(parsed["recognition_warnings"])
+      return true if warnings.any? { |warning|
+        warning.to_s.match?(/удостоверен|не товарн|отсутствуют товарный раздел|это не накладн/i)
+      }
+
+      items = Array(parsed["items"])
+      return false if items.empty?
+      return false if parsed["date"].to_s.match?(/\A2016/)
+      return false if parsed["supplier_name"].to_s.squish.match?(/\A(?:ооо|оао|зао|чуп|ип)\.?\z/i)
+      return false if warnings.any? { |warning|
+        warning.to_s.match?(/итог по строкам|количество не распознано|цена не распознана/i)
+      }
+
+      true
     end
 
     def encoded_image(image_path, prepare: true)
@@ -492,12 +588,47 @@ module Paper
     end
 
     def extract_content(body)
-      body = JSON.parse(body) if body.is_a?(String)
-      data = body.respond_to?(:deep_symbolize_keys) ? body.deep_symbolize_keys : body
+      data = gemini_payload(body)
       content = data.dig(:choices, 0, :message, :content) ||
                 data.dig(:message, :content) ||
-                data.dig(:candidates, 0, :content, :parts, 0, :text)
+                gemini_parts_text(data)
       content.is_a?(Hash) ? content.to_json : content.to_s
+    end
+
+    def gemini_payload(body)
+      body = JSON.parse(body) if body.is_a?(String)
+      body.respond_to?(:deep_symbolize_keys) ? body.deep_symbolize_keys : body
+    end
+
+    def gemini_parts_text(data)
+      parts = Array(data.dig(:candidates, 0, :content, :parts))
+      return if parts.blank?
+
+      visible = parts.filter_map { |part| gemini_part_text(part) unless thought_part?(part) }
+      return visible.join if visible.any?
+
+      parts.filter_map { |part| gemini_part_text(part) }.join.presence
+    end
+
+    def gemini_part_text(part)
+      return unless part.is_a?(Hash)
+
+      text = part[:text]
+      return text if text.present?
+      return part.except(:thought, :thought_signature).to_json if part[:items] || part[:document_number]
+
+      nil
+    end
+
+    def thought_part?(part)
+      part.is_a?(Hash) && part[:thought] == true
+    end
+
+    def gemini_finish_reason(body)
+      gemini_payload(body).dig(:candidates, 0, :finishReason).presence ||
+        gemini_payload(body).dig(:promptFeedback, :blockReason)
+    rescue StandardError
+      nil
     end
 
     def extract_json(content)

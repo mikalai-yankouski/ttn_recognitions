@@ -17,6 +17,7 @@ module Paper
           declared_line_count: nullable_integer,
           document_total: nullable_number,
           total_vat_text: nullable_string,
+          recognition_warnings: { type: "array", items: { type: "string" } },
           items: {
             type: "array",
             items: {
@@ -48,7 +49,8 @@ module Paper
           items: json_schema.dig(:properties, :items),
           declared_line_count: nullable_integer,
           document_total: nullable_number,
-          total_vat_text: nullable_string
+          total_vat_text: nullable_string,
+          recognition_warnings: { type: "array", items: { type: "string" } }
         },
         required: %w[items declared_line_count document_total total_vat_text]
       }
@@ -65,13 +67,25 @@ module Paper
       }
     end
 
+    def gemini_json_schema
+      to_gemini_schema(json_schema)
+    end
+
+    def gemini_items_json_schema
+      to_gemini_schema(items_json_schema)
+    end
+
+    def gemini_header_json_schema
+      to_gemini_schema(header_json_schema)
+    end
+
     def normalize_json(content)
       parsed = parse(content)
       return unless parsed.is_a?(Hash)
 
       parsed = parsed.stringify_keys
       warnings = []
-      items = Array(parsed["items"]).filter_map.with_index do |row, index|
+      items = coerce_items(parsed["items"]).filter_map.with_index do |row, index|
         normalize_item(row, index:, warnings:)
       end
       if items.blank?
@@ -182,18 +196,44 @@ module Paper
       digits
     end
 
+    def coerce_items(value)
+      case value
+      when Array then value
+      when Hash then [ value ]
+      when String
+        coerce_items(parse(value))
+      else
+        []
+      end
+    end
+    private_class_method :coerce_items
+
     def quality_certificate?(parsed, warnings = [])
       blob = [
         parsed["supplier_name"],
         parsed["document_kind"],
         Array(parsed["recognition_warnings"]).join(" "),
-        Array(warnings).join(" ")
+        Array(warnings).join(" "),
+        coerce_items(parsed["items"]).map { |row|
+          row.is_a?(Hash) ? row.stringify_keys["name"] : row
+        }.join(" ")
       ].join(" ")
-      blob.match?(/удостоверен/i)
+      blob.match?(/удостоверен|не товарн\p{L}* накладн|отсутствуют товарный раздел|это не накладн/i)
     end
 
     def quality_certificate_json(parsed, warnings)
-      notice = "Это удостоверение качества, а не товарная накладная."
+      notice = (
+        Array(parsed["recognition_warnings"]) + Array(warnings)
+      ).find { |warning| warning.to_s.match?(/удостоверен|не товарн|отсутствуют товарный раздел|это не накладн/i) }
+      if notice.blank?
+        notice = if coerce_items(parsed["items"]).any? { |row|
+          (row.is_a?(Hash) ? row.stringify_keys["name"] : row).to_s.match?(/удостоверен/i)
+        } || parsed["supplier_name"].to_s.match?(/удостоверен/i)
+          "Это удостоверение качества, а не товарная накладная."
+        else
+          "Это не товарная накладная."
+        end
+      end
       parsed["items"] = []
       parsed["document_number"] = nil
       parsed["supplier_name"] = normalize_supplier_name(parsed["supplier_name"])
@@ -265,6 +305,7 @@ module Paper
         [ /индивидуальный предприниматель/i, "ИП" ]
       ].each { |pattern, abbr| name.gsub!(pattern, abbr) }
       name.gsub!(/частн(?:ый|ого|ому|ая)?\s+хлеб/i, "Честный хлеб")
+      name.gsub!(/спортюнион/i, "Спортпион")
       name.gsub!(/бейковит|бейксант/i, "Бейксвит")
       name.gsub!(/кернада|кернда/i, "Керида")
       name.gsub!(/импер[ие]я\s*кофе/i, "Империя Кофе")
@@ -294,5 +335,39 @@ module Paper
       { type: [ "integer", "null" ] }
     end
     private_class_method :nullable_integer
+
+    def to_gemini_schema(node)
+      return node unless node.is_a?(Hash)
+
+      raw_type = node[:type] || node["type"]
+      types = raw_type.is_a?(Array) ? raw_type : [ raw_type ]
+      nullable = types.intersect?([ "null", :null ])
+      concrete = (types - [ "null", :null ]).first
+      result = {}
+      result[:type] = gemini_type(concrete) if concrete
+      result[:nullable] = true if nullable
+      properties = node[:properties] || node["properties"]
+      if properties
+        result[:properties] = properties.to_h { |key, value| [ key.to_s, to_gemini_schema(value) ] }
+      end
+      items = node[:items] || node["items"]
+      result[:items] = to_gemini_schema(items) if items
+      required = node[:required] || node["required"]
+      result[:required] = required if required
+      result
+    end
+    private_class_method :to_gemini_schema
+
+    def gemini_type(type)
+      {
+        "object" => "OBJECT",
+        "array" => "ARRAY",
+        "string" => "STRING",
+        "number" => "NUMBER",
+        "integer" => "INTEGER",
+        "boolean" => "BOOLEAN"
+      }.fetch(type.to_s, "STRING")
+    end
+    private_class_method :gemini_type
   end
 end

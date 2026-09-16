@@ -136,6 +136,55 @@ class VisionFallbackTest < Minitest::Test
     assert_equal "0939720", payload["document_number"]
   end
 
+  def test_gemini_inconsistent_totals_retry_before_ollama
+    gemini = stub_connection do |stubs|
+      stubs.post("models/gemini-flash-latest:generateContent") do
+        garbage = INVOICE_JSON.merge(
+          "document_total" => 999,
+          "items" => [
+            { "name" => "Круассан Классический", "quantity" => 2, "price" => 3.7, "vat_rate" => 13, "amount_with_vat" => 99 }
+          ]
+        )
+        [ 200, { "Content-Type" => "application/json" }, gemini_body(garbage) ]
+      end
+      stubs.post("models/gemini-flash-latest:generateContent") do
+        [ 200, { "Content-Type" => "application/json" }, gemini_body(INVOICE_JSON.merge("document_number" => "2143419")) ]
+      end
+    end
+    ollama = stub_connection do |stubs|
+      stubs.post("/api/chat") { flunk "inconsistent gemini JSON should retry gemini, not jump to ollama" }
+    end
+
+    json = vision(gemini:, ollama:).call(jpeg_path)
+    payload = JSON.parse(json)
+    assert_equal "2143419", payload["document_number"]
+  end
+
+  def test_gemini_reads_json_after_thought_part
+    gemini = stub_connection do |stubs|
+      stubs.post("models/gemini-flash-latest:generateContent") do
+        thought = {
+          "candidates" => [ {
+            "content" => {
+              "parts" => [
+                { "thought" => true, "text" => "разбираю шапку и таблицу ТН" },
+                { "text" => INVOICE_JSON.merge("document_number" => "2143419").to_json }
+              ]
+            }
+          } ]
+        }
+        [ 200, { "Content-Type" => "application/json" }, thought ]
+      end
+    end
+    ollama = stub_connection do |stubs|
+      stubs.post("/api/chat") { flunk "thought parts must not fall through to ollama" }
+    end
+
+    json = vision(gemini:, ollama:).call(jpeg_path)
+    payload = JSON.parse(json)
+    assert_equal "2143419", payload["document_number"]
+  end
+
   def test_payment_scan_accepts_binary_cyrillic_filename
     refute Paper::Vision.payment_scan?("тест.jpg".b)
     assert Paper::Vision.payment_scan?("счёт-на-оплату.jpg".b)

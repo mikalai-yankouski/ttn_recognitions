@@ -2,6 +2,9 @@
 
 require "logger"
 require "json"
+
+$stdout.sync = true
+$stderr.sync = true
 require "openssl"
 require "time"
 require "rack"

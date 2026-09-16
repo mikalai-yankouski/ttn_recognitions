@@ -45,9 +45,12 @@ module Paper
         return amounts_include_vat?(net, vat_amount, gross) ? infer_from_amount(net, vat_amount) : EXEMPT
       end
 
+      # Col 8 «Стоимость с НДС» is the payable amount. Bakeries often fill
+      # «Ставка НДС» / «Сумма НДС» and still copy the net into col 8.
+      return 0 if amounts_exclude_vat?(net, vat_amount, gross)
+
       inferred = infer_from_amount(net, vat_amount)
       return inferred if inferred.positive?
-      return 0 if amounts_exclude_vat?(net, vat_amount, gross)
 
       declared(value)
     end
@@ -66,7 +69,6 @@ module Paper
 
     def amounts_exclude_vat?(net, vat_amount, gross)
       return false unless net.positive? && gross.positive?
-      return false if vat_amount > 0.05
 
       (gross - net).abs <= [ 0.05.to_d, net * 0.005 ].max
     end
