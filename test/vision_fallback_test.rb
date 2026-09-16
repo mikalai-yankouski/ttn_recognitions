@@ -75,6 +75,25 @@ class VisionFallbackTest < Minitest::Test
     assert_equal "0939717", payload["document_number"]
   end
 
+  def test_busy_ollama_does_not_start_a_second_local_model
+    Paper::Vision::OLLAMA_MUTEX.lock
+    gemini = stub_connection do |stubs|
+      stubs.post("models/gemini-flash-latest:generateContent") do
+        [ 403, { "Content-Type" => "application/json" }, { "error" => { "message" => "USER_LOCATION_INVALID" } } ]
+      end
+    end
+    ollama = stub_connection do |stubs|
+      stubs.post("/api/chat") { flunk "ollama must stay serialized" }
+    end
+
+    error = assert_raises(Paper::Recognize::Unavailable) do
+      vision(gemini:, ollama:).call(jpeg_path)
+    end
+    assert_match(/Ollama занята/i, error.message)
+  ensure
+    Paper::Vision::OLLAMA_MUTEX.unlock if Paper::Vision::OLLAMA_MUTEX.owned?
+  end
+
   def test_gemini_503_tries_next_cloud_model
     ENV["PAPER_VISION_CLOUD_MODEL"] = "gemini-3-flash-preview"
     ENV["PAPER_VISION_GEMINI_FALLBACKS"] = "gemini-flash-lite-latest"

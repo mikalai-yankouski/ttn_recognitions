@@ -42,7 +42,7 @@ else
 fi
 
 export PORT="${PORT:-3000}"
-export RAILS_MAX_THREADS="${RAILS_MAX_THREADS:-2}"
+export RAILS_MAX_THREADS="${RAILS_MAX_THREADS:-8}"
 export OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 
 if ! command -v bundle >/dev/null; then

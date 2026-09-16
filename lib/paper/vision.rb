@@ -2,6 +2,7 @@
 
 require "base64"
 require "json"
+require "thread"
 require "uri"
 require_relative "utf8"
 
@@ -17,6 +18,7 @@ module Paper
     DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
     DEFAULT_GEMINI_FALLBACKS = "gemini-3.1-flash-lite,gemini-3-flash-preview"
     DEFAULT_GEMINI_BUDGET = "180"
+    OLLAMA_MUTEX = Mutex.new
     MAX_EDGE = 3072
     PROMPT = <<~TEXT.freeze
       Извлеки данные с фото белорусской товарной накладной (ТН/ТТН) или счёта на оплату.
@@ -191,7 +193,7 @@ module Paper
       end
 
       ensure_ollama_client!
-      call_ollama(image_path)
+      with_ollama_slot { call_ollama(image_path) }
     ensure
       @source_name = nil
     end
@@ -221,6 +223,17 @@ module Paper
       raise Recognize::Unavailable, "Не удалось обратиться к Ollama: #{error.message}"
     ensure
       crops&.cleanup
+    end
+
+    def with_ollama_slot
+      locked = false
+      unless (locked = OLLAMA_MUTEX.try_lock)
+        raise Recognize::Unavailable, "Ollama занята другим запросом. Повторю через Gemini."
+      end
+
+      yield
+    ensure
+      OLLAMA_MUTEX.unlock if locked
     end
 
     # Attempt 1 reads the header and table crops separately — each crop keeps
