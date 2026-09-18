@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# One-shot: Ollama + ttn on :3000 (cloudpub already maps this port).
-# Ctrl-C stops both. Tunnel stays in the other tab: `clo run`.
+# One-shot: ttn on :PORT (cloudpub maps this). Ollama only if PAPER_VISION_OLLAMA_FALLBACK=1.
+# Ctrl-C stops ttn (+ Ollama if this script started it). Tunnel: `clo run`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,14 +36,15 @@ set -a
 set +a
 
 if [ -n "${HTTPS_PROXY:-}${HTTP_PROXY:-}" ]; then
-  echo "[dev] proxy on (Gemini via corporate proxy; Ollama stays local)"
+  echo "[dev] proxy on (Gemini via corporate proxy)"
 else
-  echo "[dev] proxy off — Gemini from this network may fail, Ollama fallback stays"
+  echo "[dev] proxy off — Gemini from this network may fail"
 fi
 
 export PORT="${PORT:-3000}"
 export RAILS_MAX_THREADS="${RAILS_MAX_THREADS:-8}"
 export OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+export PAPER_VISION_OLLAMA_FALLBACK="${PAPER_VISION_OLLAMA_FALLBACK:-0}"
 
 if ! command -v bundle >/dev/null; then
   echo "[dev] bundle not in PATH. Open a new shell in this directory (rvm picks 3.2.2) and retry." >&2
@@ -65,23 +66,32 @@ ollama_up() {
   curl -sf --max-time 1 "${OLLAMA_URL}/api/tags" >/dev/null 2>&1
 }
 
-if ollama_up; then
-  echo "[dev] ollama already running at ${OLLAMA_URL}"
-else
-  echo "[dev] starting ollama serve"
-  ollama serve &
-  ollama_pid=$!
-  started_ollama=1
-  for _ in $(seq 1 40); do
-    if ollama_up; then
-      break
+want_ollama=0
+case "${PAPER_VISION_OLLAMA_FALLBACK}" in
+  1|true|TRUE|yes|YES) want_ollama=1 ;;
+esac
+
+if [ "$want_ollama" = 1 ]; then
+  if ollama_up; then
+    echo "[dev] ollama already running at ${OLLAMA_URL}"
+  else
+    echo "[dev] starting ollama serve (PAPER_VISION_OLLAMA_FALLBACK=1)"
+    ollama serve &
+    ollama_pid=$!
+    started_ollama=1
+    for _ in $(seq 1 40); do
+      if ollama_up; then
+        break
+      fi
+      sleep 0.25
+    done
+    if ! ollama_up; then
+      echo "[dev] ollama did not start on ${OLLAMA_URL}" >&2
+      exit 1
     fi
-    sleep 0.25
-  done
-  if ! ollama_up; then
-    echo "[dev] ollama did not start on ${OLLAMA_URL}" >&2
-    exit 1
   fi
+else
+  echo "[dev] ollama skipped (set PAPER_VISION_OLLAMA_FALLBACK=1 to enable)"
 fi
 
 echo "[dev] ttn http://127.0.0.1:${PORT}  (tunnel: https://maladroitly-social-worm.cloudpub.ru)"

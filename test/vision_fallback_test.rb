@@ -25,11 +25,13 @@ class VisionFallbackTest < Minitest::Test
     @fallbacks = ENV["PAPER_VISION_GEMINI_FALLBACKS"]
     @retry_sleep = ENV["PAPER_VISION_GEMINI_RETRY_SLEEP"]
     @budget = ENV["PAPER_VISION_GEMINI_BUDGET"]
+    @ollama_fallback = ENV["PAPER_VISION_OLLAMA_FALLBACK"]
     ENV["GEMINI_API_KEY"] = "test-gemini-key"
     ENV.delete("GOOGLE_API_KEY")
     ENV["PAPER_VISION_CROPS"] = "0"
     ENV["PAPER_VISION_GEMINI_RETRY_SLEEP"] = "0"
     ENV["PAPER_VISION_GEMINI_BUDGET"] = "60"
+    ENV["PAPER_VISION_OLLAMA_FALLBACK"] = "0"
   end
 
   def teardown
@@ -40,11 +42,12 @@ class VisionFallbackTest < Minitest::Test
     restore_env("PAPER_VISION_GEMINI_FALLBACKS", @fallbacks)
     restore_env("PAPER_VISION_GEMINI_RETRY_SLEEP", @retry_sleep)
     restore_env("PAPER_VISION_GEMINI_BUDGET", @budget)
+    restore_env("PAPER_VISION_OLLAMA_FALLBACK", @ollama_fallback)
   end
 
   def test_gemini_success_does_not_call_ollama
     gemini = stub_connection do |stubs|
-      stubs.post("models/gemini-flash-latest:generateContent") do
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
         [ 200, { "Content-Type" => "application/json" }, gemini_body(INVOICE_JSON) ]
       end
     end
@@ -58,9 +61,26 @@ class VisionFallbackTest < Minitest::Test
     assert_equal "Сэндвич", payload.dig("items", 0, "name")
   end
 
-  def test_gemini_unavailable_falls_back_to_ollama
+  def test_gemini_unavailable_does_not_touch_ollama_by_default
     gemini = stub_connection do |stubs|
-      stubs.post("models/gemini-flash-latest:generateContent") do
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
+        [ 403, { "Content-Type" => "application/json" }, { "error" => { "message" => "USER_LOCATION_INVALID" } } ]
+      end
+    end
+    ollama = stub_connection do |stubs|
+      stubs.post("/api/chat") { flunk "ollama fallback is off by default" }
+    end
+
+    error = assert_raises(Paper::Recognize::Unavailable) do
+      vision(gemini:, ollama:).call(jpeg_path)
+    end
+    assert_match(/облачное распознавание|недоступн/i, error.message)
+  end
+
+  def test_gemini_unavailable_falls_back_to_ollama_when_enabled
+    ENV["PAPER_VISION_OLLAMA_FALLBACK"] = "1"
+    gemini = stub_connection do |stubs|
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
         [ 403, { "Content-Type" => "application/json" }, { "error" => { "message" => "USER_LOCATION_INVALID" } } ]
       end
     end
@@ -76,9 +96,10 @@ class VisionFallbackTest < Minitest::Test
   end
 
   def test_busy_ollama_does_not_start_a_second_local_model
+    ENV["PAPER_VISION_OLLAMA_FALLBACK"] = "1"
     Paper::Vision::OLLAMA_MUTEX.lock
     gemini = stub_connection do |stubs|
-      stubs.post("models/gemini-flash-latest:generateContent") do
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
         [ 403, { "Content-Type" => "application/json" }, { "error" => { "message" => "USER_LOCATION_INVALID" } } ]
       end
     end
@@ -89,7 +110,7 @@ class VisionFallbackTest < Minitest::Test
     error = assert_raises(Paper::Recognize::Unavailable) do
       vision(gemini:, ollama:).call(jpeg_path)
     end
-    assert_match(/Ollama занята/i, error.message)
+    assert_match(/Ollama занята|занята другим запросом/i, error.message)
   ensure
     Paper::Vision::OLLAMA_MUTEX.unlock if Paper::Vision::OLLAMA_MUTEX.owned?
   end
@@ -119,12 +140,16 @@ class VisionFallbackTest < Minitest::Test
     assert_equal "0939718", payload["document_number"]
   end
 
+  def test_default_cloud_model_is_flash_lite
+    assert_equal "gemini-3.1-flash-lite", Paper::Vision::DEFAULT_GEMINI_MODEL
+  end
+
   def test_gemini_retries_until_success_within_budget
     fail_503 = [ 503, { "Content-Type" => "application/json" }, { "error" => { "status" => "UNAVAILABLE", "message" => "high demand" } } ]
     gemini = stub_connection do |stubs|
-      stubs.post("models/gemini-flash-latest:generateContent") { fail_503 }
-      stubs.post("models/gemini-flash-latest:generateContent") { fail_503 }
-      stubs.post("models/gemini-flash-latest:generateContent") do
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") { fail_503 }
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") { fail_503 }
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
         [ 200, { "Content-Type" => "application/json" }, gemini_body(INVOICE_JSON.merge("document_number" => "0939719")) ]
       end
     end
@@ -139,10 +164,10 @@ class VisionFallbackTest < Minitest::Test
 
   def test_gemini_empty_json_keeps_retrying_until_success
     gemini = stub_connection do |stubs|
-      stubs.post("models/gemini-flash-latest:generateContent") do
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
         [ 200, { "Content-Type" => "application/json" }, { "candidates" => [ { "content" => { "parts" => [ { "text" => "{}" } ] } } ] } ]
       end
-      stubs.post("models/gemini-flash-latest:generateContent") do
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
         [ 200, { "Content-Type" => "application/json" }, gemini_body(INVOICE_JSON.merge("document_number" => "0939720")) ]
       end
     end
@@ -157,7 +182,7 @@ class VisionFallbackTest < Minitest::Test
 
   def test_gemini_inconsistent_totals_retry_before_ollama
     gemini = stub_connection do |stubs|
-      stubs.post("models/gemini-flash-latest:generateContent") do
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
         garbage = INVOICE_JSON.merge(
           "document_total" => 999,
           "items" => [
@@ -166,7 +191,7 @@ class VisionFallbackTest < Minitest::Test
         )
         [ 200, { "Content-Type" => "application/json" }, gemini_body(garbage) ]
       end
-      stubs.post("models/gemini-flash-latest:generateContent") do
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
         [ 200, { "Content-Type" => "application/json" }, gemini_body(INVOICE_JSON.merge("document_number" => "2143419")) ]
       end
     end
@@ -181,7 +206,7 @@ class VisionFallbackTest < Minitest::Test
 
   def test_gemini_reads_json_after_thought_part
     gemini = stub_connection do |stubs|
-      stubs.post("models/gemini-flash-latest:generateContent") do
+      stubs.post("models/gemini-3.1-flash-lite:generateContent") do
         thought = {
           "candidates" => [ {
             "content" => {
@@ -219,7 +244,7 @@ class VisionFallbackTest < Minitest::Test
     Paper::Vision.new(
       provider: :gemini,
       api_key: "test-gemini-key",
-      model: "gemini-flash-latest",
+      model: "gemini-3.1-flash-lite",
       connection: gemini,
       ollama_connection: ollama
     )

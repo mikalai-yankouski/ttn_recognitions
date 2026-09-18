@@ -1,6 +1,6 @@
 # ttn
 
-Микросервис распознавания товарных накладных (ТН/ТТН) для [Varka](https://github.com/mikalai-yankouski/varka). Держит Ollama vision; Varka шлёт фото и подпись тенанта, получает JSON и дальше сама матчит товары в QuickResto.
+Микросервис распознавания товарных накладных (ТН/ТТН) для [Varka](https://github.com/mikalai-yankouski/varka). По умолчанию читает фото через **Gemini** (`gemini-3.1-flash-lite` + cloud fallbacks). Локальный Ollama — опциональный fallback (`PAPER_VISION_OLLAMA_FALLBACK=1`), для продакшена обычно выключен. Varka шлёт фото и подпись тенанта, получает JSON и дальше сама матчит товары в QuickResto.
 
 Публичный туннель (dev): `https://maladroitly-social-worm.cloudpub.ru/`
 
@@ -31,12 +31,10 @@
 ```bash
 bundle install
 cp .env.example .env
-ollama pull qwen2.5vl:7b
+# В .env: GEMINI_API_KEY=... (и HTTPS_PROXY, если нужен из BY)
 bin/dev
 ```
 
-`bin/dev` поднимает Ollama (если ещё не запущена) и ttn на `localhost:3000` — в этот порт смотрит cloudpub. Туннель отдельно: `clo run`. Ctrl-C гасит ttn и ту Ollama, которую скрипт сам запустил.
-
-Или `docker compose up --build`. После первого старта: `docker compose exec ollama ollama pull qwen2.5vl:7b`.
+`bin/dev` поднимает ttn (порт из `PORT`). Туннель отдельно: `clo run`. Ollama не нужна, пока не включён `PAPER_VISION_OLLAMA_FALLBACK=1`.
 
 Тесты: `bin/test`

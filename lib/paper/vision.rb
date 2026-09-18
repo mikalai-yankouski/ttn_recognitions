@@ -15,8 +15,9 @@ module Paper
     DEFAULT_XAI_URL = "https://api.x.ai/v1"
     DEFAULT_XAI_MODEL = "grok-2-vision-1212"
     DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/"
-    DEFAULT_GEMINI_MODEL = "gemini-flash-latest"
-    DEFAULT_GEMINI_FALLBACKS = "gemini-3.1-flash-lite,gemini-3-flash-preview"
+    # flash-latest often hangs; lite/preview recognize Belarusian ТН reliably.
+    DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
+    DEFAULT_GEMINI_FALLBACKS = "gemini-3-flash-preview,gemini-flash-lite-latest"
     DEFAULT_GEMINI_BUDGET = "180"
     OLLAMA_MUTEX = Mutex.new
     MAX_EDGE = 3072
@@ -190,6 +191,13 @@ module Paper
       if gemini_first?
         json = try_gemini(image_path)
         return json if json.present?
+
+        # Ollama almost never returns a usable invoice JSON for us — keep it off
+        # unless explicitly re-enabled for offline/dev.
+        unless ollama_fallback_enabled?
+          raise Recognize::Unavailable,
+                "Облачное распознавание временно недоступно. Повторите через минуту."
+        end
       end
 
       ensure_ollama_client!
@@ -365,6 +373,11 @@ module Paper
       @provider != :ollama && self.class.gemini_key.present?
     end
 
+    # Default off: local VL model burns the slot and rarely yields a reviewable draft.
+    def ollama_fallback_enabled?
+      ENV.fetch("PAPER_VISION_OLLAMA_FALLBACK", "0") != "0"
+    end
+
     def try_gemini(image_path)
       skip = {}
       started = monotonic_now
@@ -404,7 +417,11 @@ module Paper
       end
 
       elapsed = (monotonic_now - started).round(1)
-      Rails.logger.warn("[paper] gemini unavailable after #{elapsed}s, falling back to ollama")
+      if ollama_fallback_enabled?
+        Rails.logger.warn("[paper] gemini unavailable after #{elapsed}s, falling back to ollama")
+      else
+        Rails.logger.warn("[paper] gemini unavailable after #{elapsed}s (ollama fallback disabled)")
+      end
       nil
     end
 
