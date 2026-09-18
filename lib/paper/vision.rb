@@ -196,7 +196,7 @@ module Paper
         # unless explicitly re-enabled for offline/dev.
         unless ollama_fallback_enabled?
           raise Recognize::Unavailable,
-                "Облачное распознавание временно недоступно. Повторите через минуту."
+                "Очередь распознавания сейчас перегружена. Попробуйте ещё раз через минуту."
         end
       end
 

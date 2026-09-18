@@ -74,7 +74,7 @@ class VisionFallbackTest < Minitest::Test
     error = assert_raises(Paper::Recognize::Unavailable) do
       vision(gemini:, ollama:).call(jpeg_path)
     end
-    assert_match(/облачное распознавание|недоступн/i, error.message)
+    assert_match(/очередь распознавания|перегружена|попробуйте ещё раз/i, error.message)
   end
 
   def test_gemini_unavailable_falls_back_to_ollama_when_enabled
