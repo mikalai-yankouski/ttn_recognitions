@@ -15,9 +15,10 @@ module Paper
     DEFAULT_XAI_URL = "https://api.x.ai/v1"
     DEFAULT_XAI_MODEL = "grok-2-vision-1212"
     DEFAULT_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/"
-    # flash-latest often hangs; lite/preview recognize Belarusian ТН reliably.
+    # Lite models only: free Flash non-lite is ~20 RPD and dies under real TTN volume.
+    # Chain separate quota buckets so daily load can spill across models.
     DEFAULT_GEMINI_MODEL = "gemini-3.1-flash-lite"
-    DEFAULT_GEMINI_FALLBACKS = "gemini-3-flash-preview,gemini-flash-lite-latest"
+    DEFAULT_GEMINI_FALLBACKS = "gemini-3.5-flash-lite,gemini-2.5-flash-lite"
     DEFAULT_GEMINI_BUDGET = "180"
     OLLAMA_MUTEX = Mutex.new
     MAX_EDGE = 3072

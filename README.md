@@ -1,6 +1,8 @@
 # ttn
 
-Микросервис распознавания товарных накладных (ТН/ТТН) для [Varka](https://github.com/mikalai-yankouski/varka). По умолчанию читает фото через **Gemini** (`gemini-3.1-flash-lite` + cloud fallbacks). Локальный Ollama — опциональный fallback (`PAPER_VISION_OLLAMA_FALLBACK=1`), для продакшена обычно выключен. Varka шлёт фото и подпись тенанта, получает JSON и дальше сама матчит товары в QuickResto.
+Микросервис распознавания товарных накладных (ТН/ТТН) для [Varka](https://github.com/mikalai-yankouski/varka). По умолчанию читает фото через **Gemini Lite** (`gemini-3.1-flash-lite` → `gemini-3.5-flash-lite` → `gemini-2.5-flash-lite`). Обычный Flash (~20 RPD на free tier) в цепочку не ставим. Локальный Ollama — опциональный fallback (`PAPER_VISION_OLLAMA_FALLBACK=1`), для продакшена обычно выключен. Varka шлёт фото и подпись тенанта, получает JSON и дальше сама матчит товары в QuickResto.
+
+Для стабильных **~600–1000 ТН/день** на free tier мало (Lite ≈ 500 RPD на модель): включите billing в AI Studio (Tier 1+). Без биллинга объём держится только за счёт spillover между Lite-моделями и легко ломается на ретраях.
 
 Публичный туннель (dev): `https://maladroitly-social-worm.cloudpub.ru/`
 
